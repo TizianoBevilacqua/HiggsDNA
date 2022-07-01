@@ -21,7 +21,9 @@ DEFAULT_OPTIONS = {
             [0.0, 1.4442],
             [1.566, 2.5]
         ],
+        "ph_ID" : 0.2,
         "e_veto" : 0.5,
+        "e_veto_invert" : False,
         "hoe" : 0.08,
         "r9" : 0.8,
         "charged_iso" : 20.0,
@@ -105,6 +107,9 @@ class DiphotonTagger(Tagger):
                 rho = events.fixedGridRhoFastjetAll
             elif "Rho_fixedGridRhoAll" in events.fields:
                 rho = events.Rho_fixedGridRhoAll
+            else:
+                logger.exception("[DiphotonTagger : calculate_selection] Did not find valid 'rho' field.")
+                raise RuntimeError()
         else:
             rho = awkward.ones_like(events.Photon)
 
@@ -156,8 +161,14 @@ class DiphotonTagger(Tagger):
 
         # Add sumPt and dR for convenience
         diphotons[("Diphoton", "sumPt")] = diphotons.LeadPhoton.pt + diphotons.SubleadPhoton.pt
-        diphotons[("Diphoton", "dR")] = diphotons.LeadPhoton.deltaR(diphotons.SubleadPhoton)        
-
+        diphotons[("Diphoton", "dR")] = diphotons.LeadPhoton.deltaR(diphotons.SubleadPhoton) 
+        diphotons[("Diphoton", "cos_dPhi")] = numpy.cos(diphotons.LeadPhoton.deltaphi(diphotons.SubleadPhoton))
+        diphotons[("Diphoton", "leadIDMVA")] = diphotons.LeadPhoton.mvaID       
+        diphotons[("Diphoton", "subleadIDMVA")] = diphotons.SubleadPhoton.mvaID       
+        diphotons[("Diphoton", "pt_mgg")] = diphotons.Diphoton.pt / diphotons.Diphoton.mass
+        diphotons[("LeadPhoton", "pt_mgg")] = diphotons.LeadPhoton.pt / diphotons.Diphoton.mass
+        diphotons[("SubleadPhoton", "pt_mgg")] = diphotons.SubleadPhoton.pt / diphotons.Diphoton.mass 
+               
         # Add lead/sublead photons to additionally be accessible together as diphotons.Diphoton.Photon
         # This is in principle a bit redundant, but makes many systematics and selections much more convenient to implement.
         # lead/sublead photons have shape [n_events, n_diphotons_per_event], but to merge them we need to give them shape [n_events, n_diphotons_per_event, 1]
@@ -226,12 +237,17 @@ class DiphotonTagger(Tagger):
             dipho_events[(field, "eta")] = diphotons[field].eta
             dipho_events[(field, "phi")] = diphotons[field].phi
             dipho_events[(field, "mass")] = diphotons[field].mass
+            dipho_events[(field, "pt_mgg")] = diphotons[field].pt_mgg
+            if field == "Diphoton": dipho_events[(field, "cos_dPhi")] = diphotons[field].cos_dPhi
 
         dipho_presel_cut = awkward.num(dipho_events.Diphoton) >= 1
         if self.is_data and self.year is not None:
-            trigger_cut = awkward.num(dipho_events.Diphoton) < 0 # dummy cut, all False
-            for hlt in self.options["trigger"][self.year]: # logical OR of all triggers
-                trigger_cut = (trigger_cut) | (dipho_events[hlt] == True)
+            if len(self.options["trigger"][self.year]) == 0: # no triggers:
+                trigger_cut = awkward.num(dipho_events.Diphoton) >= 0 # dummy cut, all True
+            else:
+                trigger_cut = awkward.num(dipho_events.Diphoton) < 0 # dummy cut, all False
+                for hlt in self.options["trigger"][self.year]: # logical OR of all triggers
+                    trigger_cut = (trigger_cut) | (dipho_events[hlt] == True)
         else:
             trigger_cut = awkward.num(dipho_events.Diphoton) >= 0 # dummy cut, all True
 
@@ -316,8 +332,14 @@ class DiphotonTagger(Tagger):
         #eta_cut = Tagger.get_range_cut(abs(photons.eta), options["eta"]) | (photons.isScEtaEB | photons.isScEtaEE)
         eta_cut = (photons.isScEtaEB | photons.isScEtaEE)
 
-        # electron veto
-        e_veto_cut = photons.electronVeto > options["e_veto"]
+        # phothonID
+        photon_id_cut = photons.mvaID > options["ph_ID"]
+
+         # electron veto
+        if not options["e_veto_invert"]:
+            e_veto_cut = photons.electronVeto > options["e_veto"]
+        else:
+            e_veto_cut = photons.electronVeto < options["e_veto"]
 
         use_central_nano = options["use_central_nano"] # indicates whether we are using central nanoAOD (with some branches that are necessary for full diphoton preselection missing) or custom nanoAOD (with these branches added)
 
@@ -391,11 +413,11 @@ class DiphotonTagger(Tagger):
         hlt_cut = hlt_cut | photons_ee_high_r9
         hlt_cut = hlt_cut | (photons_ee_low_r9 & ee_low_r9_track_pt_cut & ee_low_r9_sigma_ieie_cut & ee_low_r9_pho_iso_cut)
 
-        all_cuts = pt_cut & eta_cut & e_veto_cut & r9_iso_cut & hoe_cut & hlt_cut
+        all_cuts = pt_cut & eta_cut & photon_id_cut & e_veto_cut & r9_iso_cut & hoe_cut & hlt_cut
 
         self.register_cuts(
-                names = ["pt", "eta", "e_veto", "r9", "hoe", "hlt", "all"],
-                results = [pt_cut, eta_cut, e_veto_cut, r9_iso_cut, hoe_cut, hlt_cut, all_cuts],
+                names = ["pt", "eta", "ph_ID", "e_veto", "r9", "hoe", "hlt", "all"],
+                results = [pt_cut, eta_cut, photon_id_cut, e_veto_cut, r9_iso_cut, hoe_cut, hlt_cut, all_cuts],
                 cut_type = "photon"
         )
 
