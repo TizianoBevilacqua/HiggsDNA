@@ -2,6 +2,7 @@ import awkward
 import vector
 import xgboost
 import numpy
+import numba
 
 vector.register_awkward()
 
@@ -20,6 +21,8 @@ DEFAULT_OPTIONS = {
     ],
     "bdt_cuts" : [0.9898, 0.882222, 0.0]
 }
+
+DUMMY_VALUE = -999.
 
 class diphoton_mva_tagger(Tagger):
     """
@@ -48,7 +51,6 @@ class diphoton_mva_tagger(Tagger):
         #calculating mass resolution in the correct vertex hipotesis
         sigmaEoE_Lead = events.LeadPhoton.energyErr /  events.LeadPhoton.energy 
         sigmaEoE_Sublead = events.SubleadPhoton.energyErr /  events.SubleadPhoton.energy
-
         sigma_m_rv = 0.5 * numpy.sqrt(sigmaEoE_Lead ** 2 + sigmaEoE_Sublead ** 2)
 
         #calculating mass resolution in the vrong vertex hipotesis
@@ -82,7 +84,37 @@ class diphoton_mva_tagger(Tagger):
         sigma_vtx = (0.5 * (-numpy.sqrt(2.0) * events.BeamSpot_sigmaZ / denominator) * (numerator_lead / r1 + numerator_sublead / r2))
         sigma_m_wv = numpy.sqrt(sigma_m_rv ** 2 + sigma_vtx ** 2)
 
-        vtx_prob = awkward.full_like(sigma_m_rv, 0.2)  # !!!! placeholder !!!!
+        #additional variables to compensate for the absence of the vtxProb MVA score
+
+        #vtx_prob = awkward.full_like(sigma_m_rv, 0.999)  # !!!! placeholder !!!!
+        vtx_prob = 2*sigma_m_rv/(sigma_m_rv+sigma_m_wv)  # !!!! placeholder !!!!
+
+        #z coordinate of primary vertices other than the main one
+        #padded to have at least 3 entry for each event (useful for slicing)
+        OtherPV_z = awkward.to_numpy(awkward.fill_none(awkward.pad_none(events.OtherPV.z, 3, axis=1), DUMMY_VALUE))
+        PV_z = awkward.to_numpy(events.PV_z)
+        events.OtherPV.z = awkward.from_numpy(OtherPV_z)
+        #reshaping to match OtherPV_z
+        PV_z = numpy.full_like(numpy.arange(3*len(PV_z)).reshape(len(PV_z), 3), 1, dtype=float)
+        PV_z[:,0] = PV_z[:,0]*events.PV_z
+        PV_z[:,1] = PV_z[:,1]*events.PV_z
+        PV_z[:,2] = PV_z[:,2]*events.PV_z
+        #z distance of the first three PVs from the main one 
+        events["OtherPV_dZ_0"] = awkward.from_numpy(numpy.abs(PV_z - OtherPV_z))
+        
+        dZ = awkward_utils.add_field(
+                events = events,
+                name = "dZ",
+                data = events.OtherPV_dZ_0
+        ) 
+
+        for i in range(len(events.OtherPV.z[0])):
+                awkward_utils.add_field(
+                    events = events,
+                    name = "%s_%d" % ("dZ", i+1),
+                    data = awkward.fill_none(events.OtherPV_dZ_0[:,i], DUMMY_VALUE),
+                    overwrite = True
+                )
 
         events["vtxProb"] = vtx_prob
         events["sigmaMrv"] = sigma_m_rv
@@ -90,10 +122,11 @@ class diphoton_mva_tagger(Tagger):
   
         events["PV_score"] = events.PV_score
         events["PV_chi2"] = events.PV_chi2
+        events["nPV"] = events.PV_npvs
 
         events["event"] = events.event
         events["run"] = events.run
-
+       
         #counts = awkward.num(events.Diphotons, axis=-1)
         #bdt_inputs = numpy.column_stack( [awkward.to_numpy(awkward.flatten(events[name])) for name in var_order] )
 
@@ -117,8 +150,7 @@ class diphoton_mva_tagger(Tagger):
             magic = f.read(2)
             opener = _magics.get(magic, lambda x: x)
         bdt.load_model(opener(fname))
-        #bdt.load_model(misc_utils.expand_path(self.options["bdt_file"]))
-
+       
         # Convert events to proper format for xgb
         events_bdt = awkward.values_astype(events, numpy.float64)
 

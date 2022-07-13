@@ -21,7 +21,7 @@ DEFAULT_OPTIONS = {
             [0.0, 1.4442],
             [1.566, 2.5]
         ],
-        "ph_ID" : 0.2,
+        "ph_ID" : -0.9,
         "e_veto" : 0.5,
         "e_veto_invert" : False,
         "hoe" : 0.08,
