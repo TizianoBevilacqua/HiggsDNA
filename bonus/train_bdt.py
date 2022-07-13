@@ -9,6 +9,10 @@ import itertools
 import vector
 
 from sklearn import metrics
+from sklearn.metrics import average_precision_score
+import matplotlib.pyplot as plt
+from sklearn import preprocessing
+from sklearn.metrics import roc_curve, auc,recall_score,precision_score
 
 from higgs_dna.utils.logger_utils import setup_logger
 
@@ -155,17 +159,22 @@ def main(args):
     events["train_split"] = awkward.from_numpy(split) # 0 = train, 1 = test, 2 = val
 
     events = awkward.nan_to_num(events, nan=-999., posinf=-999., neginf=-999.)
+    print(len(events[events["train_split"]==0]), len(events[events["train_split"]==1), len(events[events["train_split"]==2]))
 
     # Select only signal/background events
     events_bdt = events[events.train_label >= 0]
     events_bdt_train = awkward.values_astype(events_bdt[events_bdt.train_split == 0], numpy.float64)
     events_bdt_test = awkward.values_astype(events_bdt[events_bdt.train_split == 1], numpy.float64)
+    events_bdt_val  = awkward.values_astype(events_bdt[events_bdt.train_split == 2], numpy.float64)
 
     features_train = awkward.to_numpy(events_bdt_train[bdt_config["features"]])
     features_train = features_train.view((float, len(features_train.dtype.names)))
 
     features_test = awkward.to_numpy(events_bdt_test[bdt_config["features"]])
     features_test = features_test.view((float, len(features_test.dtype.names))) 
+
+    features_val  = awkward.to_numpy(events_bdt_val[bdt_config["features"]])
+    features_val  = features_val.view((float, len(features_val.dtype.names))) 
 
     # Make dmatrix for xgboost
     d_train = xgboost.DMatrix(
@@ -179,7 +188,14 @@ def main(args):
             awkward.to_numpy(events_bdt_test["train_label"]),
             weight = awkward.to_numpy(abs(events_bdt_test["weight_central"]))
     )
+
+    d_val  = xgboost.DMatrix(
+            features_val,
+            awkward.to_numpy(events_bdt_val["train_label"]),
+            weight = awkward.to_numpy(abs(events_bdt_test["weight_central"]))
+    )
  
+    print("training...")
     eval_list = [(d_train, "train"), (d_test, "test")]
     progress = {}
     bdt_config["mva"]["param"]["scale_pos_weight"] = awkward.sum(events_bdt[events_bdt.train_label == 0]["weight_central"]) / awkward.sum(events_bdt[events_bdt.train_label == 1]["weight_central"])
@@ -187,12 +203,54 @@ def main(args):
             bdt_config["mva"]["param"],
             d_train,
             bdt_config["mva"]["n_trees"],
-            eval_list, evals_result = progress,
+            eval_list, 
+            evals_result = progress,
             early_stopping_rounds = bdt_config["mva"]["early_stopping_rounds"]
     )
 
     os.system("mkdir -p %s" % (args.output_dir))
     bdt.save_model(args.output_dir + "/weights.xgb")
+
+    # Validate 
+    print("validating...")
+    check = bdt.predict(d_val, ntree_limit=bdt.best_iteration+1)
+    #area under the precision-recall curve
+    score = average_precision_score(d_val["train_label"].values, check)
+    print('area under the precision-recall curve: {:.6f}'.format(score))
+
+    check2=check.round()
+    score = precision_score(d_val["train_label"].values, check2)
+    print('precision score: {:.6f}'.format(score))
+
+    score = recall_score(d_val["train_label"].values, check2)
+    print('recall score: {:.6f}'.format(score))
+    
+    imp = get_importance(bdt, bdt_config["features"])
+    print('Importance array: ', imp)
+
+    print("Predict test set... ")
+    test_prediction = bdt.predict(d_test, ntree_limit=bdt.best_iteration+1)
+    score = average_precision_score(d_test["train_label"].values, test_prediction)
+
+    print('area under the precision-recall curve test set: {:.6f}'.format(score))
+
+    # Compute micro-average ROC curve and ROC area
+    fpr, tpr, _ = roc_curve(d_val["train_label"].values, check)
+    roc_auc = auc(fpr, tpr)
+    #xgb.plot_importance(gbm)
+    #plt.show()
+    plt.figure()
+    lw = 2
+    plt.plot(fpr, tpr, color='darkorange',
+             lw=lw, label='ROC curve (area = %0.2f)' % roc_auc)
+    plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+    plt.xlim([-0.02, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC curve')
+    plt.legend(loc="lower right")
+    plt.show()
 
     # Predict
     evts = awkward.values_astype(events, numpy.float64)
